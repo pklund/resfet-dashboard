@@ -10,6 +10,16 @@ const EventEmitter = require('events');
 const packets = require('./packets');
 const logger = require("./runtime_logging");
 
+// Set containing all load cell names:
+const loadCells = new Set();
+loadCells.add("LC_MAIN_SEND");
+loadCells.add("LC1_SEND");
+loadCells.add("LC2_SEND");
+loadCells.add("LC3_SEND");
+
+// Used to gather LC readings before summing:
+var loadCellDict = {};
+
 var udp_server = dgram.createSocket('udp4');
 
 let idletime = {};
@@ -40,7 +50,7 @@ module.exports = {
     // Process the retrieved package.
     udp_server.on('message', (msg, rinfo) => {
         let decoded = packets.decode(msg, rinfo);
-        let source = global.config.config.sources_inv[decoded[0][0]];
+        let source = global.config.config.sources_inv[decoded[0][0]]; // Type of message
         let message = decoded[1][decoded[1].length-1][0];
         let lambda = global.config.lambda[source];
         let value = lambda(message);
@@ -54,14 +64,39 @@ module.exports = {
           plot = true;
         }
 
-        // Log the value.
-        global.sensor_logger.log(source, Date.now(), value);
+        // Log the value; if source is a load cell, wait for all 4 load cell values to 
+        // log/plot at once: 
+        let summedValue = 0;
+        var loadCellReady = false;
+
+        if (loadCells.has(source)) {
+          loadCellDict[source] = value;
+
+          if (Object.keys(loadCellDict).length === 4) {
+            loadCellReady = true;
+            // Always use the "LC_MAIN_SEND" for summed load cell data:
+            // TODO: how to get programatically? 
+            source = "LC_MAIN_SEND"; 
+            for (var loadCell in loadCellDict) {
+              summedValue += loadCellDict[source];
+            }
+            loadCellDict = {};
+          }
+          global.sensor_logger.log(source, Date.now(), summedValue);
+        } else {
+          global.sensor_logger.log(source, Date.now(), value);
+        }
 
         if (plot) {
           idletime[source] = Date.now();
 
-          // Plot data on Graph.
-          global.mainWindow.webContents.executeJavaScript(`charts.plotData(${Date.now()}, '${source}', ${value});`);
+          if (loadCellReady) {
+            // Plot accumulated load cell values under "LC_MAIN_SEND":
+            global.mainWindow.webContents.executeJavaScript(`charts.plotData(${Date.now()}, '${source}', ${summedValue});`);
+          } else {
+            // Plot data on Graph.
+            global.mainWindow.webContents.executeJavaScript(`charts.plotData(${Date.now()}, '${source}', ${value});`);
+          }
         }
 
         //console.log(`[UDP] Received ${packets.formatDecode(decoded)} from ${rinfo.address}:${rinfo.port}.`);
